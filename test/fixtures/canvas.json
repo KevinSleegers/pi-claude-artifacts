@@ -1,0 +1,9 @@
+{
+  "boards": {
+    "Example-1.dc.html": { "title": "Example overview", "x": 0, "y": 0, "w": 1440, "h": 900, "page": "example-page" },
+    "Example-2.dc.html": { "title": "Example details", "x": 1500, "y": 0, "w": 390, "h": 844 },
+    "Example-3.dc.html": { "title": "Unordered example", "x": 0, "y": 1000, "w": 800, "h": 600 }
+  },
+  "order": ["Example-2.dc.html", "Example-1.dc.html"],
+  "pages": { "example-page": { "title": "Example page" } }
+}

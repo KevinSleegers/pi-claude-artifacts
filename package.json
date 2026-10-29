@@ -1,0 +1,59 @@
+{
+  "name": "pi-claude-artifacts",
+  "version": "0.1.0",
+  "description": "Read-only listing and fetching of claude.ai artifacts (Claude Designs and single pages) from Pi, through your own Claude Code login.",
+  "author": "Kevin Sleegers",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KevinSleegers/pi-claude-artifacts.git"
+  },
+  "homepage": "https://github.com/KevinSleegers/pi-claude-artifacts#readme",
+  "bugs": {
+    "url": "https://github.com/KevinSleegers/pi-claude-artifacts/issues"
+  },
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "claude",
+    "claude-design",
+    "claude-artifacts"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "hook",
+    "skills",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "@types/node": "26.6.6",
+    "@earendil-works/pi-coding-agent": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "typebox": "1.4.3"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
+  },
+  "scripts": {
+    "test": "node --test 'test/**/*.test.ts' 'test/**/*.test.mjs'",
+    "typecheck": "tsc --noEmit"
+  }
+}
