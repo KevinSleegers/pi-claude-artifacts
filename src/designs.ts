@@ -454,7 +454,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
       // Metadata only: never file bodies, and result text cut short, since all of it is untrusted service output.
       await writeFile(log, JSON.stringify([first, second].map((run) => ({ subtype: run.subtype, exitCode: run.exitCode,
         calls: run.calls.map((call) => ({ action: String(call.input.action), path: String(call.input.path) })),
-        results: run.results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 300) })) })), null, 2));
+        results: run.results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 300) })) })), null, 2), { flag: 'wx' });
       throw new FetchIncompleteError(missing, stagingDir, undefined, `Claude Code did not save them twice; run log kept at ${log}.`);
     }
     const selected = chosen.filter((file) => !unreadable.has(file.path));

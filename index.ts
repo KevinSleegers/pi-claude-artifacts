@@ -78,7 +78,7 @@ function toolError(error: unknown): Error {
 
 const cell = (text: string) => text.replace(/[\r\n]+/g, ' ').replaceAll('|', '\\|');
 const unreadableText = (paths: string[]) => paths.length
-  ? `, ${paths.length} not readable through Claude Code (export manually): ${paths.slice(0, 5).map(cell).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`
+  ? `, ${paths.length} not readable through Claude Code (export manually): ${paths.slice(0, 5).map((path) => cell(path.length > 100 ? `${path.slice(0, 99)}…` : path)).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`
   : '';
 const costText = (cost: number) => `~$${cost.toFixed(2)} on your Claude plan`;
 

@@ -47,7 +47,7 @@ for (const call of calls) {
   } else if (call.scope === 'files' && mode === 'unreadable') {
     data = { file_list: { ver: '1234567890-abcd', files: [{ path: 'index.html', size_bytes: 4, content_type: 'text/html',
       sha256: createHash('sha256').update('demo').digest('hex') }, ...Array.from({ length: 7 }, (_, i) => ({
-      path: 'project/prototype/p' + i + '.html', size_bytes: 4, content_type: 'text/html', sha256: createHash('sha256').update('demo').digest('hex') }))] } };
+      path: 'project/prototype/' + (i === 0 ? 'long-'.repeat(40) : 'p' + i) + '.html', size_bytes: 4, content_type: 'text/html', sha256: createHash('sha256').update('demo').digest('hex') }))] } };
   } else if (call.scope === 'files') {
     data = { file_list: { ver: '1234567890-abcd', files: [{ path: 'index.html', size_bytes: 4, content_type: 'text/html',
       sha256: createHash('sha256').update('demo').digest('hex') }] } };
@@ -168,11 +168,13 @@ test('the fetch url pattern accepts both artifact forms and Cowork links, nothin
 test('fetch text names unreadable files, bounded, and the manifest lists them all', async (t) => {
   const { invoke } = await setup(t, 'unreadable');
   const result = await invoke('claude_artifact_fetch', { url });
-  const all = Array.from({ length: 7 }, (_, i) => `project/prototype/p${i}.html`);
+  const all = Array.from({ length: 7 }, (_, i) => `project/prototype/${i === 0 ? 'long-'.repeat(40) : `p${i}`}.html`);
   assert.deepEqual((result.structuredContent as { unreadable: string[] }).unreadable, all);
   const text = (result.content[0] as { text: string }).text;
-  assert.match(text, /1 files, 0 artboards, 0 skipped, 7 not readable through Claude Code \(export manually\): project\/prototype\/p0\.html, .*project\/prototype\/p4\.html and 2 more\./);
+  assert.match(text, /1 files, 0 artboards, 0 skipped, 7 not readable through Claude Code \(export manually\): project\/prototype\/(long-)+l…, project\/prototype\/p1\.html, .*project\/prototype\/p4\.html and 2 more\./);
   assert.doesNotMatch(text, /p5\.html/);
+  // Each named path is cut short too: a listing's paths come from claude.ai and are unbounded.
+  assert.doesNotMatch(text, new RegExp(all[0].replaceAll('.', '\\.')));
 });
 
 test('the Design-only fetch tool is no longer registered', async (t) => {
