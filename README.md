@@ -99,13 +99,13 @@ Returns `artifacts: [{ title, url, scope, kind }]` and `costUsd`; `kind` is `"de
 
 | Parameter | Meaning |
 | --- | --- |
-| `url` | Required claude.ai artifact URL, such as a link returned by the list tool. The tool schema accepts `https://claude.ai/artifact/…` and `https://claude.ai/code/artifact/…`. |
+| `url` | Required claude.ai artifact URL, such as a link returned by the list tool. The tool schema accepts `https://claude.ai/artifact/…` and `https://claude.ai/code/artifact/…`. A Cowork link `https://claude.ai/cowork/…?artifact=<uuid>` is converted to `https://claude.ai/code/artifact/<uuid>` before any run; that this reads the same artifact is observed behaviour, not documented by Anthropic. |
 | `dest` | Optional project-local directory. **Default: `./design/design`, shared by every design.** |
 | `overwrite` | Optional boolean, default `false`. Allows replacing an existing non-empty destination. |
 
 **Pass an explicit, distinct `./design/<slug of the title>` for each artifact.** The default is not derived from its title. For “Acme Pack – Checklist / v2”, use `./design/acme-pack-checklist-v2`; add a suffix if another artifact has the same slug. Do not set `overwrite: true` without intending to replace the whole destination tree.
 
-The result contains `url`, `version`, resolved `dest`, `kind` (`"design"` or `"page"`), `checksum` (`"service"` or `"local"`), `costUsd`, `files: [{ path, bytes, sha256 }]`, `artboards: [{ file, title, w, h, page? }]`, and `skipped` paths. Files are checked on disk against read metadata and listing sizes/hashes (when a listing hash is available), then rechecked before installation. A missing or invalid canvas can yield an empty artboard list; that is not proof there are no HTML artboards.
+The result contains `url`, `version`, resolved `dest`, `kind` (`"design"` or `"page"`), `checksum` (`"service"` or `"local"`), `costUsd`, `files: [{ path, bytes, sha256 }]`, `artboards: [{ file, title, w, h, page? }]`, `skipped` paths, and `unreadable` paths: selected files whose path Claude Code refuses to read (a `__proto__`, `constructor` or `prototype` segment, or any of `? # % : ;`); they are not installed and need a manual export. Files are checked on disk against read metadata and listing sizes/hashes (when a listing hash is available), then rechecked before installation. A missing or invalid canvas can yield an empty artboard list; that is not proof there are no HTML artboards.
 
 Both `dest` and saved paths must stay inside their allowed directories after symlink resolution. A destination outside Pi's working directory, the working directory itself, or a non-empty destination without `overwrite` is refused. Replacement is prepared before the old tree is moved aside; an incomplete fetch does not install a partial result.
 
@@ -164,7 +164,7 @@ A fetch is **one file-list run plus read runs in batches of at most 100,000 list
 - **`ReadRefusedError` / “Artifact read refused”:** export manually; do not bypass permission checks.
 - **`ArtifactUnreachableError` / “claude.ai refused this artifact”:** the configured account cannot open it. Log in to the owning organisation with `/claude-artifacts-login`, then retry.
 - **`NothingToFetchError` / “Nothing to fetch”:** claude.ai lists no files and does not report a single page. Export manually.
-- **`FetchIncompleteError`:** a listing/read failed or verification was incomplete. The error identifies retained staging for inspection; the destination is not partially installed. Inspect files as data only.
+- **`FetchIncompleteError`:** a listing/read failed or verification was incomplete. The error identifies retained staging for inspection; the destination is not partially installed. Inspect files as data only. A file Claude Code silently did not save, or a batch whose run did not finish, is read once more in a fresh run; if it is still missing, the error names `read-runs.json` beside staging, holding only run metadata (subtype, exit code, each call's action and path, each result's error flag and first 300 characters).
 - **`UnexpectedCallError` / `StagingTamperedError`:** unexpected tool activity or a changed staging identity; stop and inspect rather than relaxing the guard. A changed staging boundary is retained, not recursively deleted.
 - **`RunTimeout` / `RunAborted`:** the runner terminates its process group. Retry when ready or use export. A rare unconfirmed process-group exit preserves the temporary directory rather than deleting files a process may still use.
 

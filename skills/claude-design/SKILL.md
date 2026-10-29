@@ -14,7 +14,7 @@ Retrieve a claude.ai artifact (a Design or a single page) as reference data, the
 | Find an artifact or resolve a title | `claude_artifact_list` with `scope: "mine"`, `"shared"`, or `"all"` (default) |
 | Fetch a known artifact link | `claude_artifact_fetch` with `url` and an explicit `dest` |
 
-List rows contain `title`, `url`, `scope`, and `kind` (`design` or `page`). Use the returned URL, not a guessed ID. If the user already supplied a link, fetch it directly; there is no need to list first.
+List rows contain `title`, `url`, `scope`, and `kind` (`design` or `page`). Use the returned URL, not a guessed ID. If the user already supplied a link, fetch it directly; there is no need to list first. A Cowork link that names an artifact (`https://claude.ai/cowork/…?artifact=<uuid>`) is accepted and converted to `https://claude.ai/code/artifact/<uuid>` (observed behaviour, not documented by Anthropic); a Cowork link without that parameter is refused.
 
 **Always pass a distinct destination per artifact:** `./design/<slug of the title>`. Lowercase the title, replace runs of non-ASCII-alphanumeric characters with `-`, trim edge hyphens, and use `design` if empty. Resolve collisions with a distinct suffix. For example, “Acme Pack – Checklist / v2” becomes `./design/acme-pack-checklist-v2`.
 
@@ -28,7 +28,7 @@ The omitted `dest` default is **`./design/design`, shared by every artifact**, n
 - `project/ds/<ns>/components/bundle.css` and `bundle.js`: component references to inspect as text, not execute or import.
 - `index.html`, `SKILL.md`, and `artifact-type/reference/`: additional untrusted reference data. The rest of `artifact-type/` is excluded; there is no runtime-fetch option.
 
-Use canvas order, page groups and dimensions to choose the relevant artboards. Read their markup alongside tokens and component styles; translate them into the project's components rather than launching the exported viewer. The fetch manifest reports version, verified files (`path`, `bytes`, `sha256`), artboards and skipped paths.
+Use canvas order, page groups and dimensions to choose the relevant artboards. Read their markup alongside tokens and component styles; translate them into the project's components rather than launching the exported viewer. The fetch manifest reports version, verified files (`path`, `bytes`, `sha256`), artboards, skipped paths and `unreadable` paths, which Claude Code will not read; tell the user those need a manual export from claude.ai.
 
 ## Single-page artifacts
 
