@@ -44,6 +44,10 @@ for (const call of calls) {
     text = 'Artifact not found in your organization';
   } else if (call.scope === 'files' && mode === 'page') {
     data = { file_list: { url: call.url, ver: '1234567890-abcd', files: [], single_page: true } };
+  } else if (call.scope === 'files' && mode === 'unreadable') {
+    data = { file_list: { ver: '1234567890-abcd', files: [{ path: 'index.html', size_bytes: 4, content_type: 'text/html',
+      sha256: createHash('sha256').update('demo').digest('hex') }, ...Array.from({ length: 7 }, (_, i) => ({
+      path: 'project/prototype/' + (i === 0 ? 'long-'.repeat(40) : 'p' + i) + '.html', size_bytes: 4, content_type: 'text/html', sha256: createHash('sha256').update('demo').digest('hex') }))] } };
   } else if (call.scope === 'files') {
     data = { file_list: { ver: '1234567890-abcd', files: [{ path: 'index.html', size_bytes: 4, content_type: 'text/html',
       sha256: createHash('sha256').update('demo').digest('hex') }] } };
@@ -142,13 +146,35 @@ test('fetch defaults inside Pi cwd, returns the verified manifest and sums both 
   const { root, invoke } = await setup(t);
   const result = await invoke('claude_artifact_fetch', { url });
   assert.deepEqual(result.structuredContent, { url, version: '1234567890-abcd', dest: join(root, 'design/design'),
-    kind: 'design', checksum: 'service', files: [{ path: 'index.html', bytes: 4, sha256: '2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea' }], artboards: [], skipped: [], costUsd: 0.024 });
+    kind: 'design', checksum: 'service', files: [{ path: 'index.html', bytes: 4, sha256: '2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea' }], artboards: [], skipped: [], unreadable: [], costUsd: 0.024 });
   assert.equal(await readFile(join(root, 'design/design/index.html'), 'utf8'), 'demo');
   const text = JSON.stringify(result.content);
   assert.match(text, /1 file/);
   assert.match(text, /0 artboards/);
   assert.match(text, /0 skipped/);
   assert.match(text, /~\$0\.02 on your Claude plan/);
+});
+
+test('the fetch url pattern accepts both artifact forms and Cowork links, nothing else', async (t) => {
+  const { tools } = await setup(t);
+  const pattern = new RegExp((tools.get('claude_artifact_fetch')!.parameters as any).properties.url.pattern);
+  for (const ok of [url, 'https://claude.ai/code/artifact/00000000-0000-4000-8000-000000000000',
+    'https://claude.ai/cowork/cse_000000000000?artifact=00000000-0000-4000-8000-000000000000']) assert.match(ok, pattern);
+  for (const bad of ['https://claude.ai/chat/00000000', 'https://claude.ai/project/00000000', 'https://example.com/cowork/x']) {
+    assert.doesNotMatch(bad, pattern);
+  }
+});
+
+test('fetch text names unreadable files, bounded, and the manifest lists them all', async (t) => {
+  const { invoke } = await setup(t, 'unreadable');
+  const result = await invoke('claude_artifact_fetch', { url });
+  const all = Array.from({ length: 7 }, (_, i) => `project/prototype/${i === 0 ? 'long-'.repeat(40) : `p${i}`}.html`);
+  assert.deepEqual((result.structuredContent as { unreadable: string[] }).unreadable, all);
+  const text = (result.content[0] as { text: string }).text;
+  assert.match(text, /1 files, 0 artboards, 0 skipped, 7 not readable through Claude Code \(export manually\): project\/prototype\/(long-)+l…, project\/prototype\/p1\.html, .*project\/prototype\/p4\.html and 2 more\./);
+  assert.doesNotMatch(text, /p5\.html/);
+  // Each named path is cut short too: a listing's paths come from claude.ai and are unbounded.
+  assert.doesNotMatch(text, new RegExp(all[0].replaceAll('.', '\\.')));
 });
 
 test('the Design-only fetch tool is no longer registered', async (t) => {
@@ -163,7 +189,7 @@ test('page fetch saves index.html, reports a locally computed checksum and says 
   const dest = join(root, 'design/example-page');
   assert.deepEqual(result.structuredContent, { url, version: '1234567890-abcd', dest, kind: 'page', checksum: 'local',
     files: [{ path: 'index.html', bytes: 10, sha256: createHash('sha256').update('demo page\n').digest('hex') }],
-    artboards: [], skipped: [], costUsd: 0.024 });
+    artboards: [], skipped: [], unreadable: [], costUsd: 0.024 });
   assert.equal(await readFile(join(dest, 'index.html'), 'utf8'), 'demo page\n');
   assert.equal((result.content[0] as { text: string }).text,
     `Saved page to ${dest}/index.html: 10 bytes, sha256 computed locally (claude.ai gives none).\n~$0.02 on your Claude plan`);

@@ -13,8 +13,8 @@ import { parseStream } from '../src/stream.ts';
 const url = 'https://claude.ai/artifact/AAAA000000000000000005';
 const version = '1234567890-abcd';
 const digest = (body: string | Buffer) => createHash('sha256').update(body).digest('hex');
-const fixture = (name: string): RunResult => {
-  const run = { ...parseStream(readFileSync(new URL(`./fixtures/${name}.jsonl`, import.meta.url), 'utf8')), exitCode: 0 };
+const fixture = (name: string, target = url): RunResult => {
+  const run = { ...parseStream(readFileSync(new URL(`./fixtures/${name}.jsonl`, import.meta.url), 'utf8').replaceAll(url, target)), exitCode: 0 };
   // Recorded list calls include an optional limit; these service prompts request no limit.
   if (name === 'list-mine' || name === 'list-shared') delete run.calls[0].input.limit;
   return run;
@@ -42,10 +42,13 @@ type FakeOptions = {
   read?: (run: RunResult, req: RunRequest, index: number) => Promise<void> | void;
   onRun?: (req: RunRequest, index: number) => void;
   textOnly?: boolean;
+  // The artifact URL the fake Claude Code expects in every call.
+  url?: string;
 };
 async function fetchFake(t: TestContext, options: FakeOptions = {}) {
   const { root, requests } = await sandbox(t);
-  const listing = fixture('list-files');
+  const target = options.url ?? url;
+  const listing = fixture('list-files', target);
   const structured = listing.results[0].structured as { file_list: { files: { path: string; size_bytes: number; sha256: string }[] } };
   const board = structured.file_list.files.find((f) => f.path === 'project/canvas.json')!;
   board.size_bytes = Buffer.byteLength(canvas);
@@ -57,7 +60,7 @@ async function fetchFake(t: TestContext, options: FakeOptions = {}) {
     options.onRun?.(req, index);
     assert.ok(req.maxTurns > 0 && req.timeoutMs > 0);
     if (index === 0) {
-      assert.deepEqual(requested(req), [{ action: 'list', scope: 'files', url }]);
+      assert.deepEqual(requested(req), [{ action: 'list', scope: 'files', url: target }]);
       if (options.textOnly) delete listing.results[0].structured;
       return listing;
     }
@@ -68,7 +71,7 @@ async function fetchFake(t: TestContext, options: FakeOptions = {}) {
     const calls = requested(req);
     const run: RunResult = { ...template, calls: [], results: [] };
     for (const [n, call] of calls.entries()) {
-      assert.deepEqual(call, { action: 'read', url, path: call.path, out_dir: req.stagingDir });
+      assert.deepEqual(call, { action: 'read', url: target, path: call.path, out_dir: req.stagingDir });
       const path = call.path as string;
       const body = path === 'project/canvas.json' && !options.textOnly ? canvas
         : path.endsWith('.json') ? '{}\n' : 'Example file.\n';
@@ -77,7 +80,7 @@ async function fetchFake(t: TestContext, options: FakeOptions = {}) {
       await writeFile(savedPath, body);
       const read = structuredClone(template.results[0]);
       read.toolUseId = `read-${n}`;
-      read.structured = { file_read: { url, title: 'Example design 4', path, saved_to: savedPath,
+      read.structured = { file_read: { url: target, title: 'Example design 4', path, saved_to: savedPath,
         ver: version, size_bytes: Buffer.byteLength(body), content_type: 'text/plain', sha256: digest(body), source: true, foreign: true } };
       read.text = `File saved: ${JSON.stringify(savedPath)} (${Buffer.byteLength(body)} bytes, "text/plain", sha256 ${digest(body)}) — ${JSON.stringify(path)} from version ${version}.`;
       if (options.textOnly) delete read.structured;
@@ -578,9 +581,9 @@ for (const name of ['RunAborted', 'RunTimeout', 'Error']) {
 const pageBody = 'Example page!\n';
 const recordedSaved = '/example/config/projects/-example-cwd/00000000-0000-4000-8000-000000000002/tool-results/artifact-00000000-1234567890-abcd.html';
 // Recorded fixtures name another artifact and a scrubbed saved path; point both at this test's url and file.
-const pageFixture = (name: string, savedPath = recordedSaved): RunResult => ({ ...parseStream(
+const pageFixture = (name: string, savedPath = recordedSaved, target = url): RunResult => ({ ...parseStream(
   readFileSync(new URL(`./fixtures/${name}.jsonl`, import.meta.url), 'utf8')
-    .replaceAll('https://claude.ai/artifact/AAAA000000000000000001', url).replaceAll(recordedSaved, savedPath)), exitCode: 0 });
+    .replaceAll('https://claude.ai/artifact/AAAA000000000000000001', target).replaceAll(recordedSaved, savedPath)), exitCode: 0 });
 // Assumed Claude Code project slug of the run's cwd: every non-alphanumeric character becomes '-'.
 const slugOf = (req: RunRequest) => dirname(req.stagingDir!).replace(/[^a-zA-Z0-9]/g, '-');
 
@@ -588,6 +591,7 @@ type PageOptions = {
   // Returns where the fake Claude Code says it saved the page; defaults to its observed location.
   save?: (configDir: string, req: RunRequest) => Promise<string>;
   read?: (run: RunResult, req: RunRequest) => Promise<void> | void;
+  url?: string;
 };
 async function pageFake(t: TestContext, options: PageOptions = {}) {
   const { root, requests } = await sandbox(t);
@@ -602,9 +606,9 @@ async function pageFake(t: TestContext, options: PageOptions = {}) {
   };
   const runner: ClaudeRunner = { async run(req) {
     const index = requests.push(req) - 1;
-    if (index === 0) return pageFixture('list-files-single-page');
+    if (index === 0) return pageFixture('list-files-single-page', recordedSaved, options.url);
     const savedPath = options.save ? await options.save(configDir, req) : await savedFile(req);
-    const run = pageFixture('read-page', savedPath);
+    const run = pageFixture('read-page', savedPath, options.url);
     await options.read?.(run, req);
     return run;
   } };
@@ -633,7 +637,7 @@ test('page fetch installs index.html with a locally computed checksum', async (t
   assert.deepEqual(requested(read), [{ action: 'read', url }]);
   assert.equal(await readFile(join(root, 'output/index.html'), 'utf8'), pageBody);
   assert.deepEqual(manifest, { url, version, dest: join(root, 'output'), kind: 'page', checksum: 'local',
-    files: [{ path: 'index.html', bytes: Buffer.byteLength(pageBody), sha256: digest(pageBody) }], artboards: [], skipped: [] });
+    files: [{ path: 'index.html', bytes: Buffer.byteLength(pageBody), sha256: digest(pageBody) }], artboards: [], skipped: [], unreadable: [] });
   assert.equal(existsSync(join(configDir, 'projects', slugOf(read))), false);
   assert.equal(await readFile(unrelated, 'utf8'), 'another run');
   assert.equal(existsSync(dirname(read.stagingDir)), false);
@@ -757,4 +761,215 @@ test('a refused page fetch still removes the projects directory named after this
   await rejectsIncomplete(fetchArtifact(runner, opts), root, /version does not match the listing/);
   assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[1]))), false);
   assert.equal(await readFile(unrelated, 'utf8'), 'another run');
+});
+
+const codeUrl = 'https://claude.ai/code/artifact/00000000-0000-4000-8000-0000000000AA';
+const coworkUrl = 'https://claude.ai/cowork/cse_000000000000?artifact=00000000-0000-4000-8000-0000000000AA';
+
+test('a Cowork link fetches the Design under its claude.ai/code/artifact URL', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { url: codeUrl });
+  const manifest = await fetchArtifact(runner, { ...opts, url: coworkUrl });
+  assert.equal(manifest.url, codeUrl);
+  assert.equal(manifest.files.length, 20);
+  assert.ok(requests.every((req) => requested(req).every((call) => call.url === codeUrl)));
+});
+
+test('a Cowork link to a single page allows exactly the converted page URL', async (t) => {
+  const { runner, opts, requests } = await pageFake(t, { url: codeUrl });
+  const manifest = await fetchArtifact(runner, { ...opts, url: coworkUrl });
+  assert.equal(manifest.url, codeUrl);
+  assert.equal(requests[1].pageUrl, codeUrl);
+  assert.deepEqual(requested(requests[1]), [{ action: 'read', url: codeUrl }]);
+});
+
+for (const link of ['https://claude.ai/cowork/cse_000000000000', 'https://claude.ai/cowork/cse_000000000000?artifact=not-a-uuid',
+  'https://claude.ai/cowork/cse_000000000000?artifact=00000000-0000-4000-8000-0000000000AA0'])
+  test(`a Cowork link without a valid artifact parameter is refused before any run (${link.slice(41) || 'none'})`, async (t) => {
+    const { runner, opts, requests, root } = await fetchFake(t);
+    await assert.rejects(fetchArtifact(runner, { ...opts, url: link }), /Cowork link does not name an artifact.*claude_artifact_list/);
+    assert.equal(requests.length, 0);
+    assert.equal(existsSync(join(root, 'output')), false);
+  });
+
+// Claude Code refuses these read paths itself; the listing's own names are replaced so the fixture selection stays the same.
+const unreadableNames: Record<string, string> = {
+  'project/Example-3.dc.html': 'project/prototype/Example-3.dc.html',
+  'project/Example-4.dc.html': 'project/Example 100%.dc.html',
+};
+const renameListed = (names: Record<string, string>) => (run: RunResult) => {
+  for (const file of (run.results[0].structured as any).file_list.files) file.path = names[file.path] ?? file.path;
+};
+
+test('selected files Claude Code cannot read are not requested, not installed and named as unreadable', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { list: renameListed(unreadableNames) });
+  const manifest = await fetchArtifact(runner, opts);
+  const asked = requests.slice(1).flatMap((req) => requested(req).map((call) => call.path));
+  for (const path of Object.values(unreadableNames)) {
+    assert.ok(!asked.includes(path));
+    assert.equal(existsSync(join(root, 'output', path)), false);
+  }
+  assert.deepEqual(manifest.unreadable, Object.values(unreadableNames));
+  assert.equal(manifest.files.length, 18);
+  assert.equal(manifest.skipped.length, 5);
+});
+
+for (const [name, path] of [['segment __proto__', 'project/__proto__/a.html'], ['segment constructor', 'project/constructor'],
+  ['?', 'project/a?.html'], ['#', 'project/a#b.html'], [':', 'project/a:b.html'], [';', 'project/a;b.html']])
+  test(`a selected path with ${name} is unreadable through Claude Code`, async (t) => {
+    const { runner, opts } = await fetchFake(t, { list: renameListed({ 'project/Example-4.dc.html': path }) });
+    assert.deepEqual((await fetchArtifact(runner, opts)).unreadable, [path]);
+  });
+
+test('our own unsafe-path refusal still fails the fetch rather than marking the path unreadable', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { list: renameListed({ 'project/Example-4.dc.html': 'project/a\\b.html' }) });
+  await assert.rejects(fetchArtifact(runner, opts), /Unsafe artifact path/);
+  assert.equal(requests.length, 1);
+});
+
+test('a listing whose selected files are all unreadable is NothingToFetchError before any read', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { list(run) {
+    (run.results[0].structured as any).file_list.files = [
+      { path: 'project/prototype/a.html', content_type: 'text/html', size_bytes: 3, sha256: digest('{}\n') },
+      { path: 'app.js', content_type: 'text/javascript', size_bytes: 3, sha256: digest('{}\n') }];
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof NothingToFetchError
+    && /cannot be read through Claude Code/.test(error.message) && error.message.includes(url));
+  assert.equal(requests.length, 1);
+  assert.equal(existsSync(join(root, 'output')), false);
+});
+
+const reservedError = (path: string) =>
+  `<tool_use_error>path "${path}" contains a reserved name ("__proto__", "constructor", "prototype")</tool_use_error>`;
+
+test('a read answered with the reserved-name tool_use_error marks only that file unreadable', async (t) => {
+  const { runner, opts, root } = await fetchFake(t, { read(run) {
+    const index = run.calls.findIndex((call) => call.input.path === 'project/Example-4.dc.html');
+    if (index === -1) return;
+    run.results[index] = { toolUseId: run.calls[index].id, isError: true, text: reservedError('project/Example-4.dc.html') };
+  } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.deepEqual(manifest.unreadable, ['project/Example-4.dc.html']);
+  assert.equal(manifest.files.length, 19);
+  assert.equal(existsSync(join(root, 'output/project/Example-4.dc.html')), false);
+});
+
+for (const [name, edit] of [
+  ['a successful result', (result: any, path: string) => { result.isError = false; result.text = reservedError(path); delete result.structured; }],
+  ['another path in the error', (result: any) => { result.isError = true; result.text = reservedError('project/other.html'); delete result.structured; }],
+  ['extra text around it', (result: any, path: string) => { result.isError = true; result.text = `${reservedError(path)} retry`; delete result.structured; }],
+] as const) test(`the reserved-name text in ${name} does not mark the file unreadable`, async (t) => {
+  const { runner, opts } = await fetchFake(t, { read(run) {
+    const index = run.calls.findIndex((call) => call.input.path === 'project/Example-4.dc.html');
+    if (index !== -1) edit(run.results[index], 'project/Example-4.dc.html');
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) =>
+    error instanceof FetchIncompleteError && error.missing.includes('project/Example-4.dc.html'));
+});
+
+const readPaths = (req: RunRequest) => requested(req).map((call) => call.path as string);
+
+test('a file a batch run silently did not save is read again once, alone, and installed', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index === 1) run.results.pop(); } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.equal(manifest.files.length, 20);
+  assert.equal(requests.length, 13);
+  assert.deepEqual(readPaths(requests[2]), ['artifact-type/reference/brand-colors.md']);
+  assert.deepEqual(requested(requests[2])[0], { action: 'read', url, path: 'artifact-type/reference/brand-colors.md', out_dir: requests[1].stagingDir });
+  assert.equal(requests[2].maxTurns, 4);
+});
+
+test('a batch run that did not succeed is read again once as a whole', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index === 1) run.subtype = 'error_max_turns'; } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.equal(manifest.files.length, 20);
+  assert.equal(requests.length, 13);
+  assert.deepEqual(readPaths(requests[2]), readPaths(requests[1]));
+});
+
+test('files still missing after the retry fail with a metadata-only run log beside staging', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { read(run, _req, index) {
+    if (index === 1) run.results[0].text = 'x'.repeat(1000);
+    if (index <= 2) run.results.pop();
+  } });
+  const error = await fetchArtifact(runner, opts).then(() => assert.fail('must reject'), (error: unknown) => error);
+  assert.ok(error instanceof FetchIncompleteError);
+  assert.deepEqual(error.missing, ['artifact-type/reference/brand-colors.md']);
+  assert.equal(requests.length, 3);
+  const log = join(dirname(requests[1].stagingDir!), 'read-runs.json');
+  assert.match(error.message, /Claude Code did not save them twice/);
+  assert.ok(error.message.includes(log));
+  assert.ok(existsSync(error.stagingDir));
+  assert.equal(existsSync(join(root, 'output')), false);
+  const attempts = JSON.parse(await readFile(log, 'utf8'));
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[0], { subtype: 'success', exitCode: 0,
+    calls: [{ action: 'read', path: 'SKILL.md' }, { action: 'read', path: 'artifact-type/reference/brand-colors.md' }],
+    results: [{ isError: false, text: 'x'.repeat(300) }] });
+  assert.deepEqual(attempts[1], { subtype: 'success', exitCode: 0,
+    calls: [{ action: 'read', path: 'artifact-type/reference/brand-colors.md' }], results: [] });
+});
+
+test('a batch run that fails twice is FetchIncompleteError after one retry', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index <= 2) run.subtype = 'error_max_turns'; } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof FetchIncompleteError
+    && error.missing.length === 2 && /did not save them twice/.test(error.message));
+  assert.equal(requests.length, 3);
+});
+
+for (const [name, fault] of [['verification failure', faults.badSavedHash], ['extra path', faults.extraPath],
+  ['denial', (run: RunResult) => { run.denials = [run.calls[0]]; run.results.pop(); }],
+  ['refusal text', (run: RunResult) => { run.results[0] = { ...fixture('read-refused').results[0], toolUseId: run.calls[0].id }; run.results.pop(); }],
+] as const) test(`a ${name} beside a silently missing file fails without a retry`, async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { async read(run, req, index) {
+    if (index !== 1) return;
+    await fault(run, req, index);
+    if (name !== 'denial' && name !== 'refusal text') run.results.splice(1, 1);
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof FetchIncompleteError || error instanceof ReadRefusedError);
+  assert.equal(requests.length, 2);
+});
+
+// Claude Code leaves a project folder named after each run's cwd (the fetch root); every fetch removes its own.
+async function withProjects(t: TestContext, options: FakeOptions = {}) {
+  let configDir = '';
+  const fake = await fetchFake(t, { ...options, async onRun(req, index) {
+    if (req.stagingDir) await mkdir(join(configDir, 'projects', slugOf(req)), { recursive: true });
+    options.onRun?.(req, index);
+  } });
+  configDir = join(fake.root, 'config');
+  const unrelated = join(configDir, 'projects', '-private-tmp-pi-ca-fetch-other0', 'keep.txt');
+  await mkdir(dirname(unrelated), { recursive: true });
+  await writeFile(unrelated, 'another run');
+  return { ...fake, configDir, unrelated, opts: { ...fake.opts, configDir } };
+}
+
+test('a Design fetch removes the projects folder named after its run, and only that one', async (t) => {
+  const { runner, opts, requests, configDir, unrelated } = await withProjects(t);
+  await fetchArtifact(runner, opts);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), false);
+  assert.equal(await readFile(unrelated, 'utf8'), 'another run');
+});
+
+test('a failed Design fetch that keeps staging still removes its projects folder', async (t) => {
+  const { runner, opts, requests, configDir } = await withProjects(t, { read: faults.badSavedHash });
+  await assert.rejects(fetchArtifact(runner, opts), FetchIncompleteError);
+  assert.ok(existsSync(requests[1].stagingDir!));
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), false);
+});
+
+for (const marker of [undefined, true]) test(`a runner that throws (processGroupMayRemain=${marker}) ${marker ? 'keeps' : 'removes'} the projects folder`, async (t) => {
+  const failure = Object.assign(new Error('Claude run timed out'), { name: 'RunTimeout' }, marker ? { processGroupMayRemain: true } : {});
+  const { runner, opts, requests, configDir } = await withProjects(t, { read() { throw failure; } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error === failure);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), marker === true);
+});
+
+test('a page read run that throws still removes the projects folder named after this run', async (t) => {
+  const failure = Object.assign(new Error('Claude run aborted'), { name: 'RunAborted' });
+  const { runner, opts, requests, configDir } = await pageFake(t, { async save(configDir, req) {
+    await mkdir(join(configDir, 'projects', slugOf(req)), { recursive: true });
+    throw failure;
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error === failure);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[1]))), false);
 });

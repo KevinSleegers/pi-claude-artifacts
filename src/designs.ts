@@ -7,7 +7,7 @@ import { readArtboards } from './canvas.ts';
 import type { Artboard } from './canvas.ts';
 import { parseArtifactList, parseDesignList, parseFileList, parseFileSaved, parsePageRead } from './parse.ts';
 import type { ArtifactKind, ArtifactRow, ListedFile, SavedFile } from './parse.ts';
-import { assertInside, assertSafeArtifactPath, resolveDest } from './paths.ts';
+import { artifactUrl, assertInside, assertSafeArtifactPath, readableByClaudeCode, resolveDest } from './paths.ts';
 import type { ClaudeRunner, RunResult, ToolCall, ToolResult } from './runner.ts';
 import { batchFiles, selectFiles } from './select.ts';
 
@@ -17,6 +17,8 @@ export type FetchManifest = {
   checksum: 'service' | 'local';
   files: { path: string; bytes: number; sha256: string }[];
   artboards: Artboard[]; skipped: string[];
+  // Selected files Claude Code will not read; never installed, left to a manual export.
+  unreadable: string[];
 };
 
 export class ArtifactsUnavailableError extends Error {
@@ -43,8 +45,10 @@ export class ArtifactUnreachableError extends Error {
   }
 }
 export class NothingToFetchError extends Error {
-  constructor(url: string, skipped = 0) {
-    super(skipped
+  constructor(url: string, skipped = 0, unreadable = 0) {
+    super(unreadable
+      ? `Nothing to fetch: the ${unreadable} files selected for ${url} cannot be read through Claude Code. Export the artifact manually from claude.ai instead.`
+      : skipped
       ? `Nothing to fetch: all ${skipped} files claude.ai lists for ${url} are outside what this tool fetches. Export the artifact manually from claude.ai instead.`
       : `Nothing to fetch: claude.ai lists no files for ${url} and does not report a single page.`);
     this.name = 'NothingToFetchError';
@@ -126,6 +130,11 @@ function checkAbort(signal?: AbortSignal): void {
 }
 function checkAvailable(run: RunResult): void {
   if (!run.tools.includes('Artifact')) throw new ArtifactsUnavailableError();
+}
+// Claude Code's own path validation answer, matched whole against the requested path; anything else stays a missing file.
+function reservedNameError(result: ToolResult, path: string | undefined): boolean {
+  return result.isError && path !== undefined
+    && result.text === `<tool_use_error>path ${JSON.stringify(path)} contains a reserved name ("__proto__", "constructor", "prototype")</tool_use_error>`;
 }
 function succeeded(run: RunResult): boolean {
   return run.subtype === 'success' && run.exitCode === 0;
@@ -239,7 +248,7 @@ async function readSavedPage(savedPath: string, configDir: string, bytes: number
 }
 
 // Claude Code keeps a project directory per run cwd; only the one named after this run's own fetch root is ours to remove.
-async function removePageProject(configDir: string, runRoot: string): Promise<void> {
+async function removeRunProject(configDir: string, runRoot: string): Promise<void> {
   try {
     const projects = await realpath(join(configDir, 'projects'));
     for (const segment of await readdir(projects)) {
@@ -301,6 +310,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
   url: string; cwd: string; dest?: string; overwrite?: boolean; maxBatchBytes: number; configDir: string; signal?: AbortSignal;
 }): Promise<FetchManifest> {
   checkAbort(opts.signal);
+  const url = artifactUrl(opts.url);
   batchFiles([], opts.maxBatchBytes);
   // No title is available before a run; this stable fallback permits pre-run destination refusal.
   const dest = await resolveDest(opts.cwd, opts.dest, 'design');
@@ -316,7 +326,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     identity = { root: rootIdentity, staging: await pinDirectory(stagingDir) };
     await checkStaging(identity);
     checkAbort(opts.signal);
-    const listCalls = [{ action: 'list', scope: 'files', url: opts.url }];
+    const listCalls = [{ action: 'list', scope: 'files', url }];
     const listing = await runner.run({ prompt: prompt(listCalls),
       stagingDir, maxTurns: 4, timeoutMs: 120_000, signal: opts.signal });
     checkCalls(listing, listCalls);
@@ -324,73 +334,71 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     checkAbort(opts.signal);
     checkAvailable(listing);
     // claude.ai also records its own refusal as a permission denial, so this must precede the denial check; the guard's denials keep that path.
-    const answer = listCallResults(listing, 'files', { url: opts.url }).at(-1);
+    const answer = listCallResults(listing, 'files', { url }).at(-1);
     if (answer?.isError && !answer.text.startsWith('PreToolUse:') && !answer.text.includes('Artifact guard:')) {
       throw new ArtifactUnreachableError(answer.text);
     }
     if (!succeeded(listing) || listing.denials.length) throw new FetchIncompleteError([], stagingDir);
-    const result = listResults(listing, 'files', { url: opts.url }).at(-1);
+    const result = listResults(listing, 'files', { url }).at(-1);
     if (!result) throw new FetchIncompleteError([], stagingDir);
     const { version, files, singlePage } = parseFileList(result.text, result.structured);
-    if (!files.length && !singlePage) throw new NothingToFetchError(opts.url);
+    if (!files.length && !singlePage) throw new NothingToFetchError(url);
     if (!files.length) {
-      const calls = [{ action: 'read', url: opts.url }];
-      const run = await runner.run({ prompt: prompt(calls), stagingDir, pageUrl: opts.url,
+      const calls = [{ action: 'read', url }];
+      const run = await runner.run({ prompt: prompt(calls), stagingDir, pageUrl: url,
         maxTurns: 4, timeoutMs: 120_000, signal: opts.signal });
-      // Claude Code saved the page under its projects dir once the run completed: copy it, then delete the original, whatever the outcome.
-      try {
-        checkCalls(run, calls);
-        await checkStaging(identity);
-        checkAbort(opts.signal);
-        checkAvailable(run);
-        if (run.denials.length) throw new ReadRefusedError(['index.html']);
-        if (!succeeded(run)) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read run did not succeed.');
-        const ids = new Set(run.calls.filter((call) => call.name === 'Artifact' && call.input.action === 'read').map((call) => call.id));
-        // The model-written summary in this result is discarded; only the structured fields and saved path are used.
-        const result = run.results.filter((result) => ids.has(result.toolUseId) && !result.isError).at(-1);
-        const page = result && parsePageRead(result.text, result.structured);
-        if (!page) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read result was not recognised.');
-        if (page.version !== version) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read version does not match the listing.');
-        let body: Buffer;
-        try { body = await readSavedPage(page.savedPath, opts.configDir, page.bytes, version); }
-        catch (error) {
-          throw new FetchIncompleteError(['index.html'], stagingDir, error,
-            error instanceof SavedPageError ? error.message : 'Saved page could not be read.');
-        }
-        await checkStaging(identity);
-        const stagedPath = join(identity.staging.path, 'index.html');
-        await writeFile(stagedPath, body, { flag: 'wx' });
-        const file: ListedFile = { path: 'index.html', mime: 'text/html', bytes: body.length };
-        const saved: SavedFile = { savedPath: stagedPath, path: 'index.html', bytes: body.length, mime: 'text/html',
-          sha256: createHash('sha256').update(body).digest('hex'), version };
-        let manifestFile: FetchManifest['files'][number];
-        try { manifestFile = await verifyFile(file, saved, identity, version); }
-        catch (error) {
-          if (error instanceof StagingTamperedError) throw error;
-          throw new FetchIncompleteError(['index.html'], stagingDir, error, 'Staged page failed verification.');
-        }
-        await checkStaging(identity);
-        checkAbort(opts.signal);
-        await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
-        return { url: opts.url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [] };
-      } finally {
-        await removePageProject(opts.configDir, rootIdentity.path);
-      }
-    }
-    for (const file of files) assertSafeArtifactPath(file.path);
-    const selected = selectFiles(files);
-    const selectedPaths = new Set(selected.map((file) => file.path));
-    const skipped = files.filter((file) => !selectedPaths.has(file.path)).map((file) => file.path);
-    if (!selected.length) throw new NothingToFetchError(opts.url, skipped.length);
-    const saved = new Map<string, SavedFile>();
-    for (const batch of batchFiles(selected, opts.maxBatchBytes)) {
+      // Claude Code saved the page under its projects dir once the run completed: copy it; the outer finally deletes the original.
+      checkCalls(run, calls);
       await checkStaging(identity);
       checkAbort(opts.signal);
-      const calls = batch.map((file) => ({ action: 'read', url: opts.url, path: file.path, out_dir: stagingDir }));
+      checkAvailable(run);
+      if (run.denials.length) throw new ReadRefusedError(['index.html']);
+      if (!succeeded(run)) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read run did not succeed.');
+      const ids = new Set(run.calls.filter((call) => call.name === 'Artifact' && call.input.action === 'read').map((call) => call.id));
+      // The model-written summary in this result is discarded; only the structured fields and saved path are used.
+      const result = run.results.filter((result) => ids.has(result.toolUseId) && !result.isError).at(-1);
+      const page = result && parsePageRead(result.text, result.structured);
+      if (!page) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read result was not recognised.');
+      if (page.version !== version) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read version does not match the listing.');
+      let body: Buffer;
+      try { body = await readSavedPage(page.savedPath, opts.configDir, page.bytes, version); }
+      catch (error) {
+        throw new FetchIncompleteError(['index.html'], stagingDir, error,
+          error instanceof SavedPageError ? error.message : 'Saved page could not be read.');
+      }
+      await checkStaging(identity);
+      const stagedPath = join(identity.staging.path, 'index.html');
+      await writeFile(stagedPath, body, { flag: 'wx' });
+      const file: ListedFile = { path: 'index.html', mime: 'text/html', bytes: body.length };
+      const saved: SavedFile = { savedPath: stagedPath, path: 'index.html', bytes: body.length, mime: 'text/html',
+        sha256: createHash('sha256').update(body).digest('hex'), version };
+      let manifestFile: FetchManifest['files'][number];
+      try { manifestFile = await verifyFile(file, saved, identity, version); }
+      catch (error) {
+        if (error instanceof StagingTamperedError) throw error;
+        throw new FetchIncompleteError(['index.html'], stagingDir, error, 'Staged page failed verification.');
+      }
+      await checkStaging(identity);
+      checkAbort(opts.signal);
+      await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
+      return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [], unreadable: [] };
+    }
+    for (const file of files) assertSafeArtifactPath(file.path);
+    const chosen = selectFiles(files);
+    const chosenPaths = new Set(chosen.map((file) => file.path));
+    const skipped = files.filter((file) => !chosenPaths.has(file.path)).map((file) => file.path);
+    if (!chosen.length) throw new NothingToFetchError(url, skipped.length);
+    const unreadable = new Set(chosen.filter((file) => !readableByClaudeCode(file.path)).map((file) => file.path));
+    if (unreadable.size === chosen.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);
+    const saved = new Map<string, SavedFile>();
+    const readFiles = async (batch: ListedFile[]): Promise<RunResult> => {
+      await checkStaging(identity!);
+      checkAbort(opts.signal);
+      const calls = batch.map((file) => ({ action: 'read', url, path: file.path, out_dir: stagingDir }));
       const run = await runner.run({ prompt: prompt(calls), stagingDir,
         maxTurns: batch.length * 2 + 2, timeoutMs: 120_000, signal: opts.signal });
       checkCalls(run, calls);
-      await checkStaging(identity);
+      await checkStaging(identity!);
       checkAbort(opts.signal);
       checkAvailable(run);
       const refused = run.denials.map((call) => typeof call.input.path === 'string' ? call.input.path : '')
@@ -400,6 +408,10 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
       for (const result of run.results) {
         const call = run.calls.find((call) => call.id === result.toolUseId && call.name === 'Artifact' && call.input.action === 'read');
         const path = typeof call?.input.path === 'string' ? call.input.path : undefined;
+        if (reservedNameError(result, path) && byPath.has(path!)) {
+          unreadable.add(path!);
+          continue;
+        }
         const metadata = parseFileSaved(result.text, result.structured);
         // Do not scan successful inline file bodies for refusal words: those bodies are untrusted data.
         if (!metadata && /refus|denied|permission|outside this session.?s scratchpad|not allowed|user.rejected/i.test(result.text)) {
@@ -407,13 +419,13 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
           continue;
         }
         if (!metadata) continue;
-        if (!path || call?.input.url !== opts.url || metadata.path !== path || !byPath.has(path)) {
+        if (!path || call?.input.url !== url || metadata.path !== path || !byPath.has(path)) {
           invalid.add(metadata.path);
           continue;
         }
         if (result.isError) continue;
         try {
-          await verifyFile(byPath.get(path)!, metadata, identity, version);
+          await verifyFile(byPath.get(path)!, metadata, identity!, version);
           saved.set(path, metadata);
         } catch (error) {
           if (error instanceof StagingTamperedError) throw error;
@@ -421,10 +433,33 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
         }
       }
       if (run.denials.length || refused.length) throw new ReadRefusedError(refused.length ? refused : batch.map((file) => file.path));
-      if (!succeeded(run)) throw new FetchIncompleteError(batch.map((file) => file.path), stagingDir);
-      const missing = [...invalid, ...batch.filter((file) => !saved.has(file.path)).map((file) => file.path)];
-      if (missing.length) throw new FetchIncompleteError(missing, stagingDir);
+      if (invalid.size) {
+        throw new FetchIncompleteError([...invalid, ...batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path))
+          .map((file) => file.path)], stagingDir);
+      }
+      // A run that did not finish is no evidence for what it saved; its whole batch is read again.
+      if (!succeeded(run)) for (const file of batch) saved.delete(file.path);
+      return run;
+    };
+    for (const batch of batchFiles(chosen.filter((file) => !unreadable.has(file.path)), opts.maxBatchBytes)) {
+      const unsaved = () => batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path));
+      const first = await readFiles(batch);
+      if (!unsaved().length) continue;
+      // Claude Code has once left one file of a batch unsaved without any refusal; a fresh run saved it.
+      const second = await readFiles(unsaved());
+      const missing = unsaved().map((file) => file.path);
+      if (!missing.length) continue;
+      const log = join(rootIdentity.path, 'read-runs.json');
+      await checkStaging(identity);
+      // Metadata only: never file bodies, and result text cut short, since all of it is untrusted service output.
+      await writeFile(log, JSON.stringify([first, second].map((run) => ({ subtype: run.subtype, exitCode: run.exitCode,
+        calls: run.calls.map((call) => ({ action: String(call.input.action), path: String(call.input.path) })),
+        results: run.results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 300) })) })), null, 2), { flag: 'wx' });
+      throw new FetchIncompleteError(missing, stagingDir, undefined, `Claude Code did not save them twice; run log kept at ${log}.`);
     }
+    const selected = chosen.filter((file) => !unreadable.has(file.path));
+    if (!selected.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);
+    const selectedPaths = new Set(selected.map((file) => file.path));
     const manifestFiles: FetchManifest['files'] = [];
     const invalid: string[] = [];
     // A later batch may have changed an earlier file; reverify the complete set before installation.
@@ -441,7 +476,8 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     await checkStaging(identity);
     checkAbort(opts.signal);
     await installFiles(opts.cwd, dest, selected, saved, identity, opts.overwrite, opts.signal);
-    return { url: opts.url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped };
+    return { url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped,
+      unreadable: chosen.filter((file) => unreadable.has(file.path)).map((file) => file.path) };
   } catch (error) {
     failure = error;
     keepStaging = !identity || error instanceof StagingTamperedError || error instanceof FetchIncompleteError
@@ -452,6 +488,10 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     }
     throw error;
   } finally {
+    // A Claude Code process that may still run could write there again; leave its project folder alone.
+    if (!(failure instanceof Error && 'processGroupMayRemain' in failure && failure.processGroupMayRemain === true)) {
+      await removeRunProject(opts.configDir, rootIdentity.path);
+    }
     if (!keepStaging && identity) {
       // Recursing through R is safe only while both pinned directory boundaries still match.
       let originalStaging = false;
