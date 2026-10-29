@@ -27,6 +27,7 @@ const fetchSchema = Type.Object({
   files: Type.Array(Type.Object({ path: Type.String(), bytes: Type.Number(), sha256: Type.String() })),
   artboards: Type.Array(Type.Object({ file: Type.String(), title: Type.String(), w: Type.Number(), h: Type.Number(), page: Type.Optional(Type.String()) })),
   skipped: Type.Array(Type.String()),
+  unreadable: Type.Array(Type.String()),
 });
 
 function configDir(): string {
@@ -76,6 +77,9 @@ function toolError(error: unknown): Error {
 }
 
 const cell = (text: string) => text.replace(/[\r\n]+/g, ' ').replaceAll('|', '\\|');
+const unreadableText = (paths: string[]) => paths.length
+  ? `, ${paths.length} not readable through Claude Code (export manually): ${paths.slice(0, 5).map(cell).join(', ')}${paths.length > 5 ? ` and ${paths.length - 5} more` : ''}`
+  : '';
 const costText = (cost: number) => `~$${cost.toFixed(2)} on your Claude plan`;
 
 export default function (pi: ExtensionAPI): void {
@@ -127,7 +131,7 @@ export default function (pi: ExtensionAPI): void {
         const costUsd = cost();
         const summary = manifest.kind === 'page'
           ? `Saved page to ${manifest.dest}/index.html: ${manifest.files[0].bytes} bytes, sha256 computed locally (claude.ai gives none).`
-          : `Saved to ${manifest.dest}: ${manifest.files.length} files, ${manifest.artboards.length} artboards, ${manifest.skipped.length} skipped.`;
+          : `Saved to ${manifest.dest}: ${manifest.files.length} files, ${manifest.artboards.length} artboards, ${manifest.skipped.length} skipped${unreadableText(manifest.unreadable)}.`;
         const text = `${summary}\n${costText(costUsd)}`;
         const data = { ...manifest, costUsd };
         return { content: [{ type: 'text', text }], details: data, structuredContent: data };

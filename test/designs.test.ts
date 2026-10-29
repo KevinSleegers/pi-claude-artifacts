@@ -637,7 +637,7 @@ test('page fetch installs index.html with a locally computed checksum', async (t
   assert.deepEqual(requested(read), [{ action: 'read', url }]);
   assert.equal(await readFile(join(root, 'output/index.html'), 'utf8'), pageBody);
   assert.deepEqual(manifest, { url, version, dest: join(root, 'output'), kind: 'page', checksum: 'local',
-    files: [{ path: 'index.html', bytes: Buffer.byteLength(pageBody), sha256: digest(pageBody) }], artboards: [], skipped: [] });
+    files: [{ path: 'index.html', bytes: Buffer.byteLength(pageBody), sha256: digest(pageBody) }], artboards: [], skipped: [], unreadable: [] });
   assert.equal(existsSync(join(configDir, 'projects', slugOf(read))), false);
   assert.equal(await readFile(unrelated, 'utf8'), 'another run');
   assert.equal(existsSync(dirname(read.stagingDir)), false);
@@ -790,3 +790,78 @@ for (const link of ['https://claude.ai/cowork/cse_000000000000', 'https://claude
     assert.equal(requests.length, 0);
     assert.equal(existsSync(join(root, 'output')), false);
   });
+
+// Claude Code refuses these read paths itself; the listing's own names are replaced so the fixture selection stays the same.
+const unreadableNames: Record<string, string> = {
+  'project/Example-3.dc.html': 'project/prototype/Example-3.dc.html',
+  'project/Example-4.dc.html': 'project/Example 100%.dc.html',
+};
+const renameListed = (names: Record<string, string>) => (run: RunResult) => {
+  for (const file of (run.results[0].structured as any).file_list.files) file.path = names[file.path] ?? file.path;
+};
+
+test('selected files Claude Code cannot read are not requested, not installed and named as unreadable', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { list: renameListed(unreadableNames) });
+  const manifest = await fetchArtifact(runner, opts);
+  const asked = requests.slice(1).flatMap((req) => requested(req).map((call) => call.path));
+  for (const path of Object.values(unreadableNames)) {
+    assert.ok(!asked.includes(path));
+    assert.equal(existsSync(join(root, 'output', path)), false);
+  }
+  assert.deepEqual(manifest.unreadable, Object.values(unreadableNames));
+  assert.equal(manifest.files.length, 18);
+  assert.equal(manifest.skipped.length, 5);
+});
+
+for (const [name, path] of [['segment __proto__', 'project/__proto__/a.html'], ['segment constructor', 'project/constructor'],
+  ['?', 'project/a?.html'], ['#', 'project/a#b.html'], [':', 'project/a:b.html'], [';', 'project/a;b.html']])
+  test(`a selected path with ${name} is unreadable through Claude Code`, async (t) => {
+    const { runner, opts } = await fetchFake(t, { list: renameListed({ 'project/Example-4.dc.html': path }) });
+    assert.deepEqual((await fetchArtifact(runner, opts)).unreadable, [path]);
+  });
+
+test('our own unsafe-path refusal still fails the fetch rather than marking the path unreadable', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { list: renameListed({ 'project/Example-4.dc.html': 'project/a\\b.html' }) });
+  await assert.rejects(fetchArtifact(runner, opts), /Unsafe artifact path/);
+  assert.equal(requests.length, 1);
+});
+
+test('a listing whose selected files are all unreadable is NothingToFetchError before any read', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { list(run) {
+    (run.results[0].structured as any).file_list.files = [
+      { path: 'project/prototype/a.html', content_type: 'text/html', size_bytes: 3, sha256: digest('{}\n') },
+      { path: 'app.js', content_type: 'text/javascript', size_bytes: 3, sha256: digest('{}\n') }];
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof NothingToFetchError
+    && /cannot be read through Claude Code/.test(error.message) && error.message.includes(url));
+  assert.equal(requests.length, 1);
+  assert.equal(existsSync(join(root, 'output')), false);
+});
+
+const reservedError = (path: string) =>
+  `<tool_use_error>path "${path}" contains a reserved name ("__proto__", "constructor", "prototype")</tool_use_error>`;
+
+test('a read answered with the reserved-name tool_use_error marks only that file unreadable', async (t) => {
+  const { runner, opts, root } = await fetchFake(t, { read(run) {
+    const index = run.calls.findIndex((call) => call.input.path === 'project/Example-4.dc.html');
+    if (index === -1) return;
+    run.results[index] = { toolUseId: run.calls[index].id, isError: true, text: reservedError('project/Example-4.dc.html') };
+  } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.deepEqual(manifest.unreadable, ['project/Example-4.dc.html']);
+  assert.equal(manifest.files.length, 19);
+  assert.equal(existsSync(join(root, 'output/project/Example-4.dc.html')), false);
+});
+
+for (const [name, edit] of [
+  ['a successful result', (result: any, path: string) => { result.isError = false; result.text = reservedError(path); delete result.structured; }],
+  ['another path in the error', (result: any) => { result.isError = true; result.text = reservedError('project/other.html'); delete result.structured; }],
+  ['extra text around it', (result: any, path: string) => { result.isError = true; result.text = `${reservedError(path)} retry`; delete result.structured; }],
+] as const) test(`the reserved-name text in ${name} does not mark the file unreadable`, async (t) => {
+  const { runner, opts } = await fetchFake(t, { read(run) {
+    const index = run.calls.findIndex((call) => call.input.path === 'project/Example-4.dc.html');
+    if (index !== -1) edit(run.results[index], 'project/Example-4.dc.html');
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) =>
+    error instanceof FetchIncompleteError && error.missing.includes('project/Example-4.dc.html'));
+});

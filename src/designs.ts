@@ -7,7 +7,7 @@ import { readArtboards } from './canvas.ts';
 import type { Artboard } from './canvas.ts';
 import { parseArtifactList, parseDesignList, parseFileList, parseFileSaved, parsePageRead } from './parse.ts';
 import type { ArtifactKind, ArtifactRow, ListedFile, SavedFile } from './parse.ts';
-import { artifactUrl, assertInside, assertSafeArtifactPath, resolveDest } from './paths.ts';
+import { artifactUrl, assertInside, assertSafeArtifactPath, readableByClaudeCode, resolveDest } from './paths.ts';
 import type { ClaudeRunner, RunResult, ToolCall, ToolResult } from './runner.ts';
 import { batchFiles, selectFiles } from './select.ts';
 
@@ -17,6 +17,8 @@ export type FetchManifest = {
   checksum: 'service' | 'local';
   files: { path: string; bytes: number; sha256: string }[];
   artboards: Artboard[]; skipped: string[];
+  // Selected files Claude Code will not read; never installed, left to a manual export.
+  unreadable: string[];
 };
 
 export class ArtifactsUnavailableError extends Error {
@@ -43,8 +45,10 @@ export class ArtifactUnreachableError extends Error {
   }
 }
 export class NothingToFetchError extends Error {
-  constructor(url: string, skipped = 0) {
-    super(skipped
+  constructor(url: string, skipped = 0, unreadable = 0) {
+    super(unreadable
+      ? `Nothing to fetch: the ${unreadable} files selected for ${url} cannot be read through Claude Code. Export the artifact manually from claude.ai instead.`
+      : skipped
       ? `Nothing to fetch: all ${skipped} files claude.ai lists for ${url} are outside what this tool fetches. Export the artifact manually from claude.ai instead.`
       : `Nothing to fetch: claude.ai lists no files for ${url} and does not report a single page.`);
     this.name = 'NothingToFetchError';
@@ -126,6 +130,11 @@ function checkAbort(signal?: AbortSignal): void {
 }
 function checkAvailable(run: RunResult): void {
   if (!run.tools.includes('Artifact')) throw new ArtifactsUnavailableError();
+}
+// Claude Code's own path validation answer, matched whole against the requested path; anything else stays a missing file.
+function reservedNameError(result: ToolResult, path: string | undefined): boolean {
+  return result.isError && path !== undefined
+    && result.text === `<tool_use_error>path ${JSON.stringify(path)} contains a reserved name ("__proto__", "constructor", "prototype")</tool_use_error>`;
 }
 function succeeded(run: RunResult): boolean {
   return run.subtype === 'success' && run.exitCode === 0;
@@ -373,18 +382,20 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
         await checkStaging(identity);
         checkAbort(opts.signal);
         await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
-        return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [] };
+        return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [], unreadable: [] };
       } finally {
         await removePageProject(opts.configDir, rootIdentity.path);
       }
     }
     for (const file of files) assertSafeArtifactPath(file.path);
-    const selected = selectFiles(files);
-    const selectedPaths = new Set(selected.map((file) => file.path));
-    const skipped = files.filter((file) => !selectedPaths.has(file.path)).map((file) => file.path);
-    if (!selected.length) throw new NothingToFetchError(url, skipped.length);
+    const chosen = selectFiles(files);
+    const chosenPaths = new Set(chosen.map((file) => file.path));
+    const skipped = files.filter((file) => !chosenPaths.has(file.path)).map((file) => file.path);
+    if (!chosen.length) throw new NothingToFetchError(url, skipped.length);
+    const unreadable = new Set(chosen.filter((file) => !readableByClaudeCode(file.path)).map((file) => file.path));
+    if (unreadable.size === chosen.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);
     const saved = new Map<string, SavedFile>();
-    for (const batch of batchFiles(selected, opts.maxBatchBytes)) {
+    for (const batch of batchFiles(chosen.filter((file) => !unreadable.has(file.path)), opts.maxBatchBytes)) {
       await checkStaging(identity);
       checkAbort(opts.signal);
       const calls = batch.map((file) => ({ action: 'read', url, path: file.path, out_dir: stagingDir }));
@@ -401,6 +412,10 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
       for (const result of run.results) {
         const call = run.calls.find((call) => call.id === result.toolUseId && call.name === 'Artifact' && call.input.action === 'read');
         const path = typeof call?.input.path === 'string' ? call.input.path : undefined;
+        if (reservedNameError(result, path) && byPath.has(path!)) {
+          unreadable.add(path!);
+          continue;
+        }
         const metadata = parseFileSaved(result.text, result.structured);
         // Do not scan successful inline file bodies for refusal words: those bodies are untrusted data.
         if (!metadata && /refus|denied|permission|outside this session.?s scratchpad|not allowed|user.rejected/i.test(result.text)) {
@@ -423,9 +438,12 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
       }
       if (run.denials.length || refused.length) throw new ReadRefusedError(refused.length ? refused : batch.map((file) => file.path));
       if (!succeeded(run)) throw new FetchIncompleteError(batch.map((file) => file.path), stagingDir);
-      const missing = [...invalid, ...batch.filter((file) => !saved.has(file.path)).map((file) => file.path)];
+      const missing = [...invalid, ...batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path)).map((file) => file.path)];
       if (missing.length) throw new FetchIncompleteError(missing, stagingDir);
     }
+    const selected = chosen.filter((file) => !unreadable.has(file.path));
+    if (!selected.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);
+    const selectedPaths = new Set(selected.map((file) => file.path));
     const manifestFiles: FetchManifest['files'] = [];
     const invalid: string[] = [];
     // A later batch may have changed an earlier file; reverify the complete set before installation.
@@ -442,7 +460,8 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     await checkStaging(identity);
     checkAbort(opts.signal);
     await installFiles(opts.cwd, dest, selected, saved, identity, opts.overwrite, opts.signal);
-    return { url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped };
+    return { url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped,
+      unreadable: chosen.filter((file) => unreadable.has(file.path)).map((file) => file.path) };
   } catch (error) {
     failure = error;
     keepStaging = !identity || error instanceof StagingTamperedError || error instanceof FetchIncompleteError

@@ -23,6 +23,11 @@ export function artifactUrl(url: string): string {
   return `https://claude.ai/code/artifact/${id}`;
 }
 
+// Claude Code refuses these read paths before calling claude.ai (seen in its path validation); asking only fails the batch.
+export function readableByClaudeCode(p: string): boolean {
+  return !/[?#%:;]/.test(p) && !p.split('/').some((part) => part === '__proto__' || part === 'constructor' || part === 'prototype');
+}
+
 function absoluteFrom(root: string, p: string): string {
   // Do not normalize away symlink/.. before asking the filesystem where the symlink leads.
   return isAbsolute(p) ? p : `${root}/${p}`;
