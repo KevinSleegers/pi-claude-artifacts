@@ -928,3 +928,48 @@ for (const [name, fault] of [['verification failure', faults.badSavedHash], ['ex
   await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof FetchIncompleteError || error instanceof ReadRefusedError);
   assert.equal(requests.length, 2);
 });
+
+// Claude Code leaves a project folder named after each run's cwd (the fetch root); every fetch removes its own.
+async function withProjects(t: TestContext, options: FakeOptions = {}) {
+  let configDir = '';
+  const fake = await fetchFake(t, { ...options, async onRun(req, index) {
+    if (req.stagingDir) await mkdir(join(configDir, 'projects', slugOf(req)), { recursive: true });
+    options.onRun?.(req, index);
+  } });
+  configDir = join(fake.root, 'config');
+  const unrelated = join(configDir, 'projects', '-private-tmp-pi-ca-fetch-other0', 'keep.txt');
+  await mkdir(dirname(unrelated), { recursive: true });
+  await writeFile(unrelated, 'another run');
+  return { ...fake, configDir, unrelated, opts: { ...fake.opts, configDir } };
+}
+
+test('a Design fetch removes the projects folder named after its run, and only that one', async (t) => {
+  const { runner, opts, requests, configDir, unrelated } = await withProjects(t);
+  await fetchArtifact(runner, opts);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), false);
+  assert.equal(await readFile(unrelated, 'utf8'), 'another run');
+});
+
+test('a failed Design fetch that keeps staging still removes its projects folder', async (t) => {
+  const { runner, opts, requests, configDir } = await withProjects(t, { read: faults.badSavedHash });
+  await assert.rejects(fetchArtifact(runner, opts), FetchIncompleteError);
+  assert.ok(existsSync(requests[1].stagingDir!));
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), false);
+});
+
+for (const marker of [undefined, true]) test(`a runner that throws (processGroupMayRemain=${marker}) ${marker ? 'keeps' : 'removes'} the projects folder`, async (t) => {
+  const failure = Object.assign(new Error('Claude run timed out'), { name: 'RunTimeout' }, marker ? { processGroupMayRemain: true } : {});
+  const { runner, opts, requests, configDir } = await withProjects(t, { read() { throw failure; } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error === failure);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[0]))), marker === true);
+});
+
+test('a page read run that throws still removes the projects folder named after this run', async (t) => {
+  const failure = Object.assign(new Error('Claude run aborted'), { name: 'RunAborted' });
+  const { runner, opts, requests, configDir } = await pageFake(t, { async save(configDir, req) {
+    await mkdir(join(configDir, 'projects', slugOf(req)), { recursive: true });
+    throw failure;
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error === failure);
+  assert.equal(existsSync(join(configDir, 'projects', slugOf(requests[1]))), false);
+});

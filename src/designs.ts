@@ -248,7 +248,7 @@ async function readSavedPage(savedPath: string, configDir: string, bytes: number
 }
 
 // Claude Code keeps a project directory per run cwd; only the one named after this run's own fetch root is ours to remove.
-async function removePageProject(configDir: string, runRoot: string): Promise<void> {
+async function removeRunProject(configDir: string, runRoot: string): Promise<void> {
   try {
     const projects = await realpath(join(configDir, 'projects'));
     for (const segment of await readdir(projects)) {
@@ -347,45 +347,41 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
       const calls = [{ action: 'read', url }];
       const run = await runner.run({ prompt: prompt(calls), stagingDir, pageUrl: url,
         maxTurns: 4, timeoutMs: 120_000, signal: opts.signal });
-      // Claude Code saved the page under its projects dir once the run completed: copy it, then delete the original, whatever the outcome.
-      try {
-        checkCalls(run, calls);
-        await checkStaging(identity);
-        checkAbort(opts.signal);
-        checkAvailable(run);
-        if (run.denials.length) throw new ReadRefusedError(['index.html']);
-        if (!succeeded(run)) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read run did not succeed.');
-        const ids = new Set(run.calls.filter((call) => call.name === 'Artifact' && call.input.action === 'read').map((call) => call.id));
-        // The model-written summary in this result is discarded; only the structured fields and saved path are used.
-        const result = run.results.filter((result) => ids.has(result.toolUseId) && !result.isError).at(-1);
-        const page = result && parsePageRead(result.text, result.structured);
-        if (!page) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read result was not recognised.');
-        if (page.version !== version) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read version does not match the listing.');
-        let body: Buffer;
-        try { body = await readSavedPage(page.savedPath, opts.configDir, page.bytes, version); }
-        catch (error) {
-          throw new FetchIncompleteError(['index.html'], stagingDir, error,
-            error instanceof SavedPageError ? error.message : 'Saved page could not be read.');
-        }
-        await checkStaging(identity);
-        const stagedPath = join(identity.staging.path, 'index.html');
-        await writeFile(stagedPath, body, { flag: 'wx' });
-        const file: ListedFile = { path: 'index.html', mime: 'text/html', bytes: body.length };
-        const saved: SavedFile = { savedPath: stagedPath, path: 'index.html', bytes: body.length, mime: 'text/html',
-          sha256: createHash('sha256').update(body).digest('hex'), version };
-        let manifestFile: FetchManifest['files'][number];
-        try { manifestFile = await verifyFile(file, saved, identity, version); }
-        catch (error) {
-          if (error instanceof StagingTamperedError) throw error;
-          throw new FetchIncompleteError(['index.html'], stagingDir, error, 'Staged page failed verification.');
-        }
-        await checkStaging(identity);
-        checkAbort(opts.signal);
-        await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
-        return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [], unreadable: [] };
-      } finally {
-        await removePageProject(opts.configDir, rootIdentity.path);
+      // Claude Code saved the page under its projects dir once the run completed: copy it; the outer finally deletes the original.
+      checkCalls(run, calls);
+      await checkStaging(identity);
+      checkAbort(opts.signal);
+      checkAvailable(run);
+      if (run.denials.length) throw new ReadRefusedError(['index.html']);
+      if (!succeeded(run)) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read run did not succeed.');
+      const ids = new Set(run.calls.filter((call) => call.name === 'Artifact' && call.input.action === 'read').map((call) => call.id));
+      // The model-written summary in this result is discarded; only the structured fields and saved path are used.
+      const result = run.results.filter((result) => ids.has(result.toolUseId) && !result.isError).at(-1);
+      const page = result && parsePageRead(result.text, result.structured);
+      if (!page) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read result was not recognised.');
+      if (page.version !== version) throw new FetchIncompleteError(['index.html'], stagingDir, undefined, 'Page read version does not match the listing.');
+      let body: Buffer;
+      try { body = await readSavedPage(page.savedPath, opts.configDir, page.bytes, version); }
+      catch (error) {
+        throw new FetchIncompleteError(['index.html'], stagingDir, error,
+          error instanceof SavedPageError ? error.message : 'Saved page could not be read.');
       }
+      await checkStaging(identity);
+      const stagedPath = join(identity.staging.path, 'index.html');
+      await writeFile(stagedPath, body, { flag: 'wx' });
+      const file: ListedFile = { path: 'index.html', mime: 'text/html', bytes: body.length };
+      const saved: SavedFile = { savedPath: stagedPath, path: 'index.html', bytes: body.length, mime: 'text/html',
+        sha256: createHash('sha256').update(body).digest('hex'), version };
+      let manifestFile: FetchManifest['files'][number];
+      try { manifestFile = await verifyFile(file, saved, identity, version); }
+      catch (error) {
+        if (error instanceof StagingTamperedError) throw error;
+        throw new FetchIncompleteError(['index.html'], stagingDir, error, 'Staged page failed verification.');
+      }
+      await checkStaging(identity);
+      checkAbort(opts.signal);
+      await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
+      return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [], unreadable: [] };
     }
     for (const file of files) assertSafeArtifactPath(file.path);
     const chosen = selectFiles(files);
@@ -492,6 +488,10 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     }
     throw error;
   } finally {
+    // A Claude Code process that may still run could write there again; leave its project folder alone.
+    if (!(failure instanceof Error && 'processGroupMayRemain' in failure && failure.processGroupMayRemain === true)) {
+      await removeRunProject(opts.configDir, rootIdentity.path);
+    }
     if (!keepStaging && identity) {
       // Recursing through R is safe only while both pinned directory boundaries still match.
       let originalStaging = false;
