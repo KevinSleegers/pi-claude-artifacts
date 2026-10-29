@@ -351,6 +351,35 @@ for (const mode of ['abort', 'timeout'] as const) {
     });
 }
 
+// macOS refuses group signals with EPERM while the group holds only unreaped zombies.
+test('abort treats EPERM from a zombie-only process group as still present until it is reaped', { timeout: 8000 }, async (t) => {
+  const { socket, ready } = await readyProcess(t);
+  const controller = new AbortController();
+  const kill = process.kill.bind(process);
+  let details: ProcessDetails | undefined;
+  let refused = 0;
+  t.mock.method(process, 'kill', (pid: number, value?: NodeJS.Signals | number) => {
+    if (details && pid === -details.pid) {
+      // A real group signal that is followed by EPERM, the way Darwin reports a group it cannot signal.
+      kill(pid, value);
+      refused++;
+      throw Object.assign(new Error('kill EPERM'), { code: 'EPERM' });
+    }
+    return kill(pid, value);
+  });
+  const running = runner.run({ ...req, timeoutMs: 60000,
+    prompt: JSON.stringify({ mode: 'sleep', socket }), signal: controller.signal });
+  const settled = running.then(() => undefined, (error: unknown) => error);
+  t.after(async () => { controller.abort(); await settled; });
+  details = await ready;
+  controller.abort();
+  const error = await within(settled, 6500);
+  assert.ok(error instanceof Error);
+  assert.equal(error.name, 'RunAborted');
+  assert.ok(refused > 0, 'the group signal was refused at least once');
+  assertGone(details.pid);
+});
+
 test('already aborted requests reject without invoking even a nonexistent executable', { timeout: 5000 }, async () => {
   const controller = new AbortController();
   controller.abort();

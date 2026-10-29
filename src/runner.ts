@@ -86,7 +86,10 @@ export function createSpawnRunner(opts: RunnerOptions): ClaudeRunner {
           if (child.pid === undefined) return false;
           try { process.kill(-child.pid, signal); return true; }
           catch (error) {
-            if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error;
+            const code = (error as NodeJS.ErrnoException).code;
+            // Darwin answers EPERM for a group of unreaped zombies; keep polling until it is gone.
+            if (code === 'EPERM') return true;
+            if (code !== 'ESRCH') throw error;
             return false;
           }
         };
