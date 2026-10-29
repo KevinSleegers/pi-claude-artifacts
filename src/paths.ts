@@ -24,7 +24,8 @@ export function artifactUrl(url: string): string {
 }
 
 // Claude Code refuses these read paths before calling claude.ai (seen in its path validation); asking only fails the batch.
-export function readableByClaudeCode(p: string): boolean {
+export function readableByClaudeCode(path: string): boolean {
+  const p = path.normalize('NFC');
   return !/[?#%:;]/.test(p) && !p.split('/').some((part) => part === '__proto__' || part === 'constructor' || part === 'prototype');
 }
 

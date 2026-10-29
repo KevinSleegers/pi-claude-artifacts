@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, realpath, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { artifactUrl, assertInside, assertSafeArtifactPath, resolveDest, slugify } from '../src/paths.ts';
+import { artifactUrl, assertInside, assertSafeArtifactPath, readableByClaudeCode, resolveDest, slugify } from '../src/paths.ts';
 
 test('slugify produces deterministic directory names', () => {
   for (const [title, expected] of [['Untitled', 'untitled'], ['  ', 'design'],
@@ -74,4 +74,10 @@ test('artifactUrl converts a Cowork link to its code artifact URL and keeps the 
     'https://claude.ai/cowork/cse_0?artifact=../../artifact/AAAA']) {
     assert.throws(() => artifactUrl(refused), /Cowork link does not name an artifact/);
   }
+});
+
+test('readableByClaudeCode judges the NFC form, as Claude Code does', () => {
+  // U+037E GREEK QUESTION MARK normalizes to ";", which Claude Code refuses.
+  assert.equal(readableByClaudeCode('project/a\u037eb.html'), false);
+  assert.equal(readableByClaudeCode('project/caf\u00e9.html'), true);
 });
