@@ -106,7 +106,7 @@ export default function (pi: ExtensionAPI): void {
     name: 'claude_artifact_fetch', label: 'Claude artifact fetch',
     description: 'Fetch and verify a claude.ai artifact (a Design or a single page) into the local project; never executes it or writes to claude.ai. Pass a distinct dest per artifact, e.g. ./design/<slug of the title from claude_artifact_list>, because the default ./design/design is shared. Each call uses Haiku on your Claude plan.',
     parameters: Type.Object({
-      url: Type.String({ pattern: '^https://claude\\.ai/(code/)?artifact/', description: 'claude.ai artifact URL.' }),
+      url: Type.String({ pattern: '^https://claude\\.ai/((code/)?artifact/|cowork/)', description: 'claude.ai artifact URL, or a Cowork link that names an artifact.' }),
       dest: Type.Optional(Type.String({ description: 'Project-local directory. Pass a distinct dest per artifact, e.g. ./design/<slug of the title from claude_artifact_list>; the default ./design/design is shared.' })),
       overwrite: Type.Optional(Type.Boolean({ description: 'Replace an existing non-empty destination (default false).' })),
     }),

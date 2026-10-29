@@ -3,7 +3,7 @@ import { lstat, mkdir, mkdtemp, realpath, readdir, rm, symlink, writeFile } from
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { assertInside, assertSafeArtifactPath, resolveDest, slugify } from '../src/paths.ts';
+import { artifactUrl, assertInside, assertSafeArtifactPath, resolveDest, slugify } from '../src/paths.ts';
 
 test('slugify produces deterministic directory names', () => {
   for (const [title, expected] of [['Untitled', 'untitled'], ['  ', 'design'],
@@ -60,5 +60,18 @@ test('destination and containment guards canonicalize ancestors without creating
     await assertInside(alias, join(cwd, 'inside/new'));
   } finally {
     await rm(temp, { recursive: true, force: true });
+  }
+});
+
+test('artifactUrl converts a Cowork link to its code artifact URL and keeps the artifact forms', () => {
+  const id = '00000000-0000-4000-8000-0000000000aA';
+  assert.equal(artifactUrl(`https://claude.ai/cowork/cse_000000000000?artifact=${id}`), `https://claude.ai/code/artifact/${id}`);
+  assert.equal(artifactUrl(`https://claude.ai/cowork/x/y?tab=1&artifact=${id}#z`), `https://claude.ai/code/artifact/${id}`);
+  for (const kept of ['https://claude.ai/artifact/AAAA000000000000000001', `https://claude.ai/code/artifact/${id}`]) {
+    assert.equal(artifactUrl(kept), kept);
+  }
+  for (const refused of ['https://claude.ai/cowork/cse_000000000000', `https://claude.ai/cowork/cse_0?artifact=${id}x`,
+    'https://claude.ai/cowork/cse_0?artifact=../../artifact/AAAA']) {
+    assert.throws(() => artifactUrl(refused), /Cowork link does not name an artifact/);
   }
 });

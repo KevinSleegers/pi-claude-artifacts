@@ -99,7 +99,7 @@ Returns `artifacts: [{ title, url, scope, kind }]` and `costUsd`; `kind` is `"de
 
 | Parameter | Meaning |
 | --- | --- |
-| `url` | Required claude.ai artifact URL, such as a link returned by the list tool. The tool schema accepts `https://claude.ai/artifact/…` and `https://claude.ai/code/artifact/…`. |
+| `url` | Required claude.ai artifact URL, such as a link returned by the list tool. The tool schema accepts `https://claude.ai/artifact/…` and `https://claude.ai/code/artifact/…`. A Cowork link `https://claude.ai/cowork/…?artifact=<uuid>` is converted to `https://claude.ai/code/artifact/<uuid>` before any run; that this reads the same artifact is observed behaviour, not documented by Anthropic. |
 | `dest` | Optional project-local directory. **Default: `./design/design`, shared by every design.** |
 | `overwrite` | Optional boolean, default `false`. Allows replacing an existing non-empty destination. |
 

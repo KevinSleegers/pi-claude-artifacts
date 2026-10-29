@@ -151,6 +151,16 @@ test('fetch defaults inside Pi cwd, returns the verified manifest and sums both 
   assert.match(text, /~\$0\.02 on your Claude plan/);
 });
 
+test('the fetch url pattern accepts both artifact forms and Cowork links, nothing else', async (t) => {
+  const { tools } = await setup(t);
+  const pattern = new RegExp((tools.get('claude_artifact_fetch')!.parameters as any).properties.url.pattern);
+  for (const ok of [url, 'https://claude.ai/code/artifact/00000000-0000-4000-8000-000000000000',
+    'https://claude.ai/cowork/cse_000000000000?artifact=00000000-0000-4000-8000-000000000000']) assert.match(ok, pattern);
+  for (const bad of ['https://claude.ai/chat/00000000', 'https://claude.ai/project/00000000', 'https://example.com/cowork/x']) {
+    assert.doesNotMatch(bad, pattern);
+  }
+});
+
 test('the Design-only fetch tool is no longer registered', async (t) => {
   const { tools } = await setup(t);
   assert.equal(tools.has('claude_design_fetch'), false);

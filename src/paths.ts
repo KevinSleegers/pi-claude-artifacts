@@ -12,6 +12,17 @@ export function assertSafeArtifactPath(p: string): void {
   }
 }
 
+// Claude Code's Artifact tool takes only artifact URLs, not a Cowork session link; the uuid in a Cowork link's
+// artifact parameter read as claude.ai/code/artifact/<uuid> (observed, not documented by Anthropic).
+export function artifactUrl(url: string): string {
+  if (!url.startsWith('https://claude.ai/cowork/')) return url;
+  const id = new URL(url).searchParams.get('artifact') ?? '';
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('This Cowork link does not name an artifact. Open the artifact in Cowork and copy a link that names it, or use claude_artifact_list.');
+  }
+  return `https://claude.ai/code/artifact/${id}`;
+}
+
 function absoluteFrom(root: string, p: string): string {
   // Do not normalize away symlink/.. before asking the filesystem where the symlink leads.
   return isAbsolute(p) ? p : `${root}/${p}`;

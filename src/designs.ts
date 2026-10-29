@@ -7,7 +7,7 @@ import { readArtboards } from './canvas.ts';
 import type { Artboard } from './canvas.ts';
 import { parseArtifactList, parseDesignList, parseFileList, parseFileSaved, parsePageRead } from './parse.ts';
 import type { ArtifactKind, ArtifactRow, ListedFile, SavedFile } from './parse.ts';
-import { assertInside, assertSafeArtifactPath, resolveDest } from './paths.ts';
+import { artifactUrl, assertInside, assertSafeArtifactPath, resolveDest } from './paths.ts';
 import type { ClaudeRunner, RunResult, ToolCall, ToolResult } from './runner.ts';
 import { batchFiles, selectFiles } from './select.ts';
 
@@ -301,6 +301,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
   url: string; cwd: string; dest?: string; overwrite?: boolean; maxBatchBytes: number; configDir: string; signal?: AbortSignal;
 }): Promise<FetchManifest> {
   checkAbort(opts.signal);
+  const url = artifactUrl(opts.url);
   batchFiles([], opts.maxBatchBytes);
   // No title is available before a run; this stable fallback permits pre-run destination refusal.
   const dest = await resolveDest(opts.cwd, opts.dest, 'design');
@@ -316,7 +317,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     identity = { root: rootIdentity, staging: await pinDirectory(stagingDir) };
     await checkStaging(identity);
     checkAbort(opts.signal);
-    const listCalls = [{ action: 'list', scope: 'files', url: opts.url }];
+    const listCalls = [{ action: 'list', scope: 'files', url }];
     const listing = await runner.run({ prompt: prompt(listCalls),
       stagingDir, maxTurns: 4, timeoutMs: 120_000, signal: opts.signal });
     checkCalls(listing, listCalls);
@@ -324,18 +325,18 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     checkAbort(opts.signal);
     checkAvailable(listing);
     // claude.ai also records its own refusal as a permission denial, so this must precede the denial check; the guard's denials keep that path.
-    const answer = listCallResults(listing, 'files', { url: opts.url }).at(-1);
+    const answer = listCallResults(listing, 'files', { url }).at(-1);
     if (answer?.isError && !answer.text.startsWith('PreToolUse:') && !answer.text.includes('Artifact guard:')) {
       throw new ArtifactUnreachableError(answer.text);
     }
     if (!succeeded(listing) || listing.denials.length) throw new FetchIncompleteError([], stagingDir);
-    const result = listResults(listing, 'files', { url: opts.url }).at(-1);
+    const result = listResults(listing, 'files', { url }).at(-1);
     if (!result) throw new FetchIncompleteError([], stagingDir);
     const { version, files, singlePage } = parseFileList(result.text, result.structured);
-    if (!files.length && !singlePage) throw new NothingToFetchError(opts.url);
+    if (!files.length && !singlePage) throw new NothingToFetchError(url);
     if (!files.length) {
-      const calls = [{ action: 'read', url: opts.url }];
-      const run = await runner.run({ prompt: prompt(calls), stagingDir, pageUrl: opts.url,
+      const calls = [{ action: 'read', url }];
+      const run = await runner.run({ prompt: prompt(calls), stagingDir, pageUrl: url,
         maxTurns: 4, timeoutMs: 120_000, signal: opts.signal });
       // Claude Code saved the page under its projects dir once the run completed: copy it, then delete the original, whatever the outcome.
       try {
@@ -372,7 +373,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
         await checkStaging(identity);
         checkAbort(opts.signal);
         await installFiles(opts.cwd, dest, [file], new Map([[file.path, saved]]), identity, opts.overwrite, opts.signal);
-        return { url: opts.url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [] };
+        return { url, version, dest, kind: 'page', checksum: 'local', files: [manifestFile], artboards: [], skipped: [] };
       } finally {
         await removePageProject(opts.configDir, rootIdentity.path);
       }
@@ -381,12 +382,12 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     const selected = selectFiles(files);
     const selectedPaths = new Set(selected.map((file) => file.path));
     const skipped = files.filter((file) => !selectedPaths.has(file.path)).map((file) => file.path);
-    if (!selected.length) throw new NothingToFetchError(opts.url, skipped.length);
+    if (!selected.length) throw new NothingToFetchError(url, skipped.length);
     const saved = new Map<string, SavedFile>();
     for (const batch of batchFiles(selected, opts.maxBatchBytes)) {
       await checkStaging(identity);
       checkAbort(opts.signal);
-      const calls = batch.map((file) => ({ action: 'read', url: opts.url, path: file.path, out_dir: stagingDir }));
+      const calls = batch.map((file) => ({ action: 'read', url, path: file.path, out_dir: stagingDir }));
       const run = await runner.run({ prompt: prompt(calls), stagingDir,
         maxTurns: batch.length * 2 + 2, timeoutMs: 120_000, signal: opts.signal });
       checkCalls(run, calls);
@@ -407,7 +408,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
           continue;
         }
         if (!metadata) continue;
-        if (!path || call?.input.url !== opts.url || metadata.path !== path || !byPath.has(path)) {
+        if (!path || call?.input.url !== url || metadata.path !== path || !byPath.has(path)) {
           invalid.add(metadata.path);
           continue;
         }
@@ -441,7 +442,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     await checkStaging(identity);
     checkAbort(opts.signal);
     await installFiles(opts.cwd, dest, selected, saved, identity, opts.overwrite, opts.signal);
-    return { url: opts.url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped };
+    return { url, version, dest, kind: 'design', checksum: 'service', files: manifestFiles, artboards, skipped };
   } catch (error) {
     failure = error;
     keepStaging = !identity || error instanceof StagingTamperedError || error instanceof FetchIncompleteError
