@@ -19,6 +19,12 @@ Not affiliated with or endorsed by Anthropic. Claude, Claude Code and Claude Des
 - Node.js 22.19 or newer with native TypeScript stripping (development checks used Node 26.13.0).
 - macOS or Linux process-group support; Windows is untested.
 
+From npm:
+
+```sh
+pi install npm:pi-claude-artifacts
+```
+
 From GitHub:
 
 ```sh
@@ -31,7 +37,7 @@ Or from a local checkout:
 pi install ./
 ```
 
-It is not on npm yet. Pi loads `index.ts` and the bundled `skills/` resource. The package is MIT licensed; see [LICENSE](LICENSE).
+Pi loads `index.ts` and the bundled `skills/` resource. The package is MIT licensed; see [LICENSE](LICENSE).
 
 ## Separate account login
 
