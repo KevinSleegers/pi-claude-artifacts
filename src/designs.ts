@@ -395,14 +395,14 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
     const unreadable = new Set(chosen.filter((file) => !readableByClaudeCode(file.path)).map((file) => file.path));
     if (unreadable.size === chosen.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);
     const saved = new Map<string, SavedFile>();
-    for (const batch of batchFiles(chosen.filter((file) => !unreadable.has(file.path)), opts.maxBatchBytes)) {
-      await checkStaging(identity);
+    const readFiles = async (batch: ListedFile[]): Promise<RunResult> => {
+      await checkStaging(identity!);
       checkAbort(opts.signal);
       const calls = batch.map((file) => ({ action: 'read', url, path: file.path, out_dir: stagingDir }));
       const run = await runner.run({ prompt: prompt(calls), stagingDir,
         maxTurns: batch.length * 2 + 2, timeoutMs: 120_000, signal: opts.signal });
       checkCalls(run, calls);
-      await checkStaging(identity);
+      await checkStaging(identity!);
       checkAbort(opts.signal);
       checkAvailable(run);
       const refused = run.denials.map((call) => typeof call.input.path === 'string' ? call.input.path : '')
@@ -429,7 +429,7 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
         }
         if (result.isError) continue;
         try {
-          await verifyFile(byPath.get(path)!, metadata, identity, version);
+          await verifyFile(byPath.get(path)!, metadata, identity!, version);
           saved.set(path, metadata);
         } catch (error) {
           if (error instanceof StagingTamperedError) throw error;
@@ -437,9 +437,29 @@ export async function fetchArtifact(runner: ClaudeRunner, opts: {
         }
       }
       if (run.denials.length || refused.length) throw new ReadRefusedError(refused.length ? refused : batch.map((file) => file.path));
-      if (!succeeded(run)) throw new FetchIncompleteError(batch.map((file) => file.path), stagingDir);
-      const missing = [...invalid, ...batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path)).map((file) => file.path)];
-      if (missing.length) throw new FetchIncompleteError(missing, stagingDir);
+      if (invalid.size) {
+        throw new FetchIncompleteError([...invalid, ...batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path))
+          .map((file) => file.path)], stagingDir);
+      }
+      // A run that did not finish is no evidence for what it saved; its whole batch is read again.
+      if (!succeeded(run)) for (const file of batch) saved.delete(file.path);
+      return run;
+    };
+    for (const batch of batchFiles(chosen.filter((file) => !unreadable.has(file.path)), opts.maxBatchBytes)) {
+      const unsaved = () => batch.filter((file) => !saved.has(file.path) && !unreadable.has(file.path));
+      const first = await readFiles(batch);
+      if (!unsaved().length) continue;
+      // Claude Code has once left one file of a batch unsaved without any refusal; a fresh run saved it.
+      const second = await readFiles(unsaved());
+      const missing = unsaved().map((file) => file.path);
+      if (!missing.length) continue;
+      const log = join(rootIdentity.path, 'read-runs.json');
+      await checkStaging(identity);
+      // Metadata only: never file bodies, and result text cut short, since all of it is untrusted service output.
+      await writeFile(log, JSON.stringify([first, second].map((run) => ({ subtype: run.subtype, exitCode: run.exitCode,
+        calls: run.calls.map((call) => ({ action: String(call.input.action), path: String(call.input.path) })),
+        results: run.results.map((result) => ({ isError: result.isError, text: result.text.slice(0, 300) })) })), null, 2));
+      throw new FetchIncompleteError(missing, stagingDir, undefined, `Claude Code did not save them twice; run log kept at ${log}.`);
     }
     const selected = chosen.filter((file) => !unreadable.has(file.path));
     if (!selected.length) throw new NothingToFetchError(url, skipped.length, unreadable.size);

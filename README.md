@@ -164,7 +164,7 @@ A fetch is **one file-list run plus read runs in batches of at most 100,000 list
 - **`ReadRefusedError` / “Artifact read refused”:** export manually; do not bypass permission checks.
 - **`ArtifactUnreachableError` / “claude.ai refused this artifact”:** the configured account cannot open it. Log in to the owning organisation with `/claude-artifacts-login`, then retry.
 - **`NothingToFetchError` / “Nothing to fetch”:** claude.ai lists no files and does not report a single page. Export manually.
-- **`FetchIncompleteError`:** a listing/read failed or verification was incomplete. The error identifies retained staging for inspection; the destination is not partially installed. Inspect files as data only.
+- **`FetchIncompleteError`:** a listing/read failed or verification was incomplete. The error identifies retained staging for inspection; the destination is not partially installed. Inspect files as data only. A file Claude Code silently did not save, or a batch whose run did not finish, is read once more in a fresh run; if it is still missing, the error names `read-runs.json` beside staging, holding only run metadata (subtype, exit code, each call's action and path, each result's error flag and first 300 characters).
 - **`UnexpectedCallError` / `StagingTamperedError`:** unexpected tool activity or a changed staging identity; stop and inspect rather than relaxing the guard. A changed staging boundary is retained, not recursively deleted.
 - **`RunTimeout` / `RunAborted`:** the runner terminates its process group. Retry when ready or use export. A rare unconfirmed process-group exit preserves the temporary directory rather than deleting files a process may still use.
 

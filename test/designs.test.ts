@@ -865,3 +865,66 @@ for (const [name, edit] of [
   await assert.rejects(fetchArtifact(runner, opts), (error: unknown) =>
     error instanceof FetchIncompleteError && error.missing.includes('project/Example-4.dc.html'));
 });
+
+const readPaths = (req: RunRequest) => requested(req).map((call) => call.path as string);
+
+test('a file a batch run silently did not save is read again once, alone, and installed', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index === 1) run.results.pop(); } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.equal(manifest.files.length, 20);
+  assert.equal(requests.length, 13);
+  assert.deepEqual(readPaths(requests[2]), ['artifact-type/reference/brand-colors.md']);
+  assert.deepEqual(requested(requests[2])[0], { action: 'read', url, path: 'artifact-type/reference/brand-colors.md', out_dir: requests[1].stagingDir });
+  assert.equal(requests[2].maxTurns, 4);
+});
+
+test('a batch run that did not succeed is read again once as a whole', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index === 1) run.subtype = 'error_max_turns'; } });
+  const manifest = await fetchArtifact(runner, opts);
+  assert.equal(manifest.files.length, 20);
+  assert.equal(requests.length, 13);
+  assert.deepEqual(readPaths(requests[2]), readPaths(requests[1]));
+});
+
+test('files still missing after the retry fail with a metadata-only run log beside staging', async (t) => {
+  const { runner, opts, requests, root } = await fetchFake(t, { read(run, _req, index) {
+    if (index === 1) run.results[0].text = 'x'.repeat(1000);
+    if (index <= 2) run.results.pop();
+  } });
+  const error = await fetchArtifact(runner, opts).then(() => assert.fail('must reject'), (error: unknown) => error);
+  assert.ok(error instanceof FetchIncompleteError);
+  assert.deepEqual(error.missing, ['artifact-type/reference/brand-colors.md']);
+  assert.equal(requests.length, 3);
+  const log = join(dirname(requests[1].stagingDir!), 'read-runs.json');
+  assert.match(error.message, /Claude Code did not save them twice/);
+  assert.ok(error.message.includes(log));
+  assert.ok(existsSync(error.stagingDir));
+  assert.equal(existsSync(join(root, 'output')), false);
+  const attempts = JSON.parse(await readFile(log, 'utf8'));
+  assert.equal(attempts.length, 2);
+  assert.deepEqual(attempts[0], { subtype: 'success', exitCode: 0,
+    calls: [{ action: 'read', path: 'SKILL.md' }, { action: 'read', path: 'artifact-type/reference/brand-colors.md' }],
+    results: [{ isError: false, text: 'x'.repeat(300) }] });
+  assert.deepEqual(attempts[1], { subtype: 'success', exitCode: 0,
+    calls: [{ action: 'read', path: 'artifact-type/reference/brand-colors.md' }], results: [] });
+});
+
+test('a batch run that fails twice is FetchIncompleteError after one retry', async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { read(run, _req, index) { if (index <= 2) run.subtype = 'error_max_turns'; } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof FetchIncompleteError
+    && error.missing.length === 2 && /did not save them twice/.test(error.message));
+  assert.equal(requests.length, 3);
+});
+
+for (const [name, fault] of [['verification failure', faults.badSavedHash], ['extra path', faults.extraPath],
+  ['denial', (run: RunResult) => { run.denials = [run.calls[0]]; run.results.pop(); }],
+  ['refusal text', (run: RunResult) => { run.results[0] = { ...fixture('read-refused').results[0], toolUseId: run.calls[0].id }; run.results.pop(); }],
+] as const) test(`a ${name} beside a silently missing file fails without a retry`, async (t) => {
+  const { runner, opts, requests } = await fetchFake(t, { async read(run, req, index) {
+    if (index !== 1) return;
+    await fault(run, req, index);
+    if (name !== 'denial' && name !== 'refusal text') run.results.splice(1, 1);
+  } });
+  await assert.rejects(fetchArtifact(runner, opts), (error: unknown) => error instanceof FetchIncompleteError || error instanceof ReadRefusedError);
+  assert.equal(requests.length, 2);
+});
