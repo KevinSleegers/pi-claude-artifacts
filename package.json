@@ -42,7 +42,7 @@
     "@types/node": "26.6.6",
     "@earendil-works/pi-coding-agent": "1.4.0",
     "@earendil-works/pi-ai": "1.4.0",
-    "typebox": "1.4.3"
+    "typebox": "1.4.6"
   },
   "pi": {
     "extensions": [
